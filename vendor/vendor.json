@@ -13,6 +13,12 @@
 			"path": "github.com/hyperledger/fabric/core/chaincode/shim/ext/cid",
 			"revision": "d700b43476e803c864c48021e63a78543b60e17e",
 			"revisionTime": "2019-01-09T15:47:59Z"
+		},
+		{
+			"checksumSHA1": "I7hloldMJZTqUx6hbVDp5nk9fZQ=",
+			"path": "github.com/pkg/errors",
+			"revision": "27936f6d90f9c8e1145f11ed52ffffbfdb9e0af7",
+			"revisionTime": "2019-02-27T00:00:51Z"
 		}
 	],
 	"rootPath": "github.com/blockchain"

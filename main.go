@@ -25,7 +25,7 @@ type CarDetails struct {
 	Year          string `json:"makeYear"`
 	Model         string `json:"model"`
 	Color         string `json:"color"`
-	LisenseNunber string `json:"licNumber"`
+	LicenseNunber string `json:"licNumber"`
 	Status        string `json:"status"`
 	Dealer        string `json:"dealer"`
 	OwnerName     string `json:"owner"`
@@ -53,6 +53,10 @@ func (sc *SmartContract) probe(stub shim.ChaincodeStubInterface) pb.Response {
 }
 
 func (sc *SmartContract) createCarEntry(stub shim.ChaincodeStubInterface) pb.Response {
+	if sc.getOrganizationRole(stub) != "CARMAKER" {
+		_MainLogger.Errorf("Trxn not allowed ")
+		return shim.Error("Trxn not allowed ")
+	}
 	_, args := stub.GetFunctionAndParameters()
 	if len(args) < 1 {
 		_MainLogger.Errorf("Invalid number of arguments")
@@ -86,36 +90,77 @@ func (sc *SmartContract) createCarEntry(stub shim.ChaincodeStubInterface) pb.Res
 
 	return shim.Success([]byte(jsonBytesToStore))
 }
-func (sc *SmartContract) saveKV(stub shim.ChaincodeStubInterface) pb.Response {
+
+func (sc *SmartContract) modifyCarEntity(stub shim.ChaincodeStubInterface) pb.Response {
+	_, args := stub.GetFunctionAndParameters()
+	if len(args) < 1 {
+		_MainLogger.Errorf("Invalid number of arguments")
+		return shim.Error("Invalid number of arguments")
+	}
+	var carDetails CarDetails
+	if err := json.Unmarshal([]byte(args[0]), &carDetails); err != nil {
+		_MainLogger.Errorf("Unable to parse the input car details JSON %v", err)
+		return shim.Error("Unable to parse the input car details JSON")
+	}
+	idOk, who := sc.getInvokerIdentity(stub)
+	if !idOk {
+		return shim.Error("Unable to retrive the invoker ID")
+	}
+	if strings.TrimSpace(carDetails.ChasisNumber) == "" {
+		_MainLogger.Error("No chasis number provided")
+		return shim.Error("No chasis number provided")
+	}
+	var existingEntity CarDetails
+	recordBytes, err := stub.GetState(carDetails.ChasisNumber)
+	if err != nil {
+		_MainLogger.Error("Invalid chasis number provided")
+		return shim.Error("Invalid chasis number provided")
+	}
+	if err := json.Unmarshal([]byte(recordBytes), &existingEntity); err != nil {
+		_MainLogger.Errorf("Unable to parse the existing car details JSON %v", err)
+		return shim.Error("Unable to parse the existing car details JSON")
+	}
+	existingEntity.UpdateBy = who
+	existingEntity.TrxnID = stub.GetTxID()
+	existingEntity.UpdateTs = sc.getTrxnTS(stub)
+	//TODO: Checks on the status change
+	if len(strings.TrimSpace(carDetails.Status)) > 0 {
+		existingEntity.Status = carDetails.Status
+	}
+	if len(existingEntity.Dealer) == 0 && len(strings.TrimSpace(carDetails.Dealer)) > 0 {
+		existingEntity.Dealer = carDetails.Dealer
+	}
+	if len(strings.TrimSpace(carDetails.OwnerName)) > 0 {
+		existingEntity.OwnerName = carDetails.OwnerName
+	}
+	if len(strings.TrimSpace(carDetails.LicenseNunber)) > 0 {
+		existingEntity.LicenseNunber = carDetails.LicenseNunber
+	}
+	jsonBytesToStore, _ := json.Marshal(existingEntity)
+	//TODO: Check the chasis number
+	if err := stub.PutState(carDetails.ChasisNumber, jsonBytesToStore); err != nil {
+		_MainLogger.Errorf("Unable to store the car details %v", err)
+		return shim.Error("Unable to store the car details ")
+	}
+
+	return shim.Success([]byte(jsonBytesToStore))
+}
+
+func (sc *SmartContract) registerOrg(stub shim.ChaincodeStubInterface) pb.Response {
 	_, args := stub.GetFunctionAndParameters()
 	if len(args) < 1 {
 		return shim.Error("Invalid number of arguments")
 	}
-	inputJSON := args[0]
-	kvList := make([]map[string]string, 0)
-	err := json.Unmarshal([]byte(inputJSON), &kvList)
-	if err != nil {
-		return shim.Error("Can not convert input JSON to valid input")
+	participantRole := args[0]
+	idOk, who := sc.getInvokerIdentity(stub)
+	if !idOk {
+		return shim.Error("Unable to retrive the invoker ID")
 	}
-	if len(kvList) == 0 {
-		return shim.Error("Empty data provided")
-	}
-	for _, kv := range kvList {
-		key := kv["key"]
-		value := kv["value"]
-		txID := stub.GetTxID()
-		dataToStore := map[string]string{
-			"value":  value,
-			"trxnId": txID,
-			"id":     key,
-		}
-		jsonBytesToStore, _ := json.Marshal(dataToStore)
-		stub.PutState(key, jsonBytesToStore)
-	}
-
-	return shim.Success([]byte(fmt.Sprintf("%d records saved", len(kvList))))
+	key := fmt.Sprintf("PARTICIPANT_%s", who)
+	stub.PutState(key, []byte(participantRole))
+	return shim.Success([]byte("Organization registered"))
 }
-func (sc *SmartContract) query(stub shim.ChaincodeStubInterface) pb.Response {
+func (sc *SmartContract) queryCar(stub shim.ChaincodeStubInterface) pb.Response {
 	_, args := stub.GetFunctionAndParameters()
 	if len(args) < 1 {
 		return shim.Error("Invalid number of arguments")
@@ -129,6 +174,29 @@ func (sc *SmartContract) query(stub shim.ChaincodeStubInterface) pb.Response {
 
 	return shim.Success(data)
 }
+func (sc *SmartContract) queryCarHistory(stub shim.ChaincodeStubInterface) pb.Response {
+	_, args := stub.GetFunctionAndParameters()
+	if len(args) < 1 {
+		return shim.Error("Invalid number of arguments")
+	}
+	key := args[0]
+	history, err := stub.GetHistoryForKey(key)
+	if err != nil {
+		return shim.Error("Unable to retrive history")
+
+	}
+	historyRecords := make([]map[string]interface{}, 0)
+	for history.HasNext() {
+		if rslt, err := history.Next(); err == nil {
+			recordMap := make(map[string]interface{})
+			if parseErr := json.Unmarshal(rslt.Value, &recordMap); parseErr == nil {
+				historyRecords = append(historyRecords, recordMap)
+			}
+		}
+	}
+	outputJSON, _ := json.Marshal(historyRecords)
+	return shim.Success(outputJSON)
+}
 
 //Invoke is the entry point for any transaction
 func (sc *SmartContract) Invoke(stub shim.ChaincodeStubInterface) pb.Response {
@@ -137,12 +205,16 @@ func (sc *SmartContract) Invoke(stub shim.ChaincodeStubInterface) pb.Response {
 	switch action {
 	case "probe":
 		response = sc.probe(stub)
-	case "createCarEntry":
+	case "createCarDetails":
 		response = sc.createCarEntry(stub)
-	case "saveKV":
-		response = sc.saveKV(stub)
-	case "query":
-		response = sc.query(stub)
+	case "modifyCarDetails":
+		response = sc.modifyCarEntity(stub)
+	case "queryCar":
+		response = sc.queryCar(stub)
+	case "queryHistory":
+		response = sc.queryCarHistory(stub)
+	case "registerOrg":
+		response = sc.registerOrg(stub)
 	default:
 		response = shim.Error("Invalid action provoided")
 	}
@@ -151,11 +223,16 @@ func (sc *SmartContract) Invoke(stub shim.ChaincodeStubInterface) pb.Response {
 
 func (sc *SmartContract) getInvokerIdentity(stub shim.ChaincodeStubInterface) (bool, string) {
 	//Following id comes in the format X509::<Subject>::<Issuer>>
-	enCert, err := id.GetX509Certificate(stub)
+	/*enCert, err := id.GetX509Certificate(stub)
+	if err != nil {
+		return false, "Unknown."
+	}*/
+
+	mspID, err := id.GetMSPID(stub)
 	if err != nil {
 		return false, "Unknown."
 	}
-	return true, fmt.Sprintf("%s", enCert.Subject.CommonName)
+	return true, fmt.Sprintf("%s", mspID)
 
 }
 func (sc *SmartContract) getTrxnTS(stub shim.ChaincodeStubInterface) string {
@@ -166,6 +243,23 @@ func (sc *SmartContract) getTrxnTS(stub shim.ChaincodeStubInterface) string {
 	var ts time.Time
 	newTS := ts.Add(time.Duration(txTime.Seconds) * time.Second)
 	return newTS.Format("2006.01.02.15.04.05.000")
+
+}
+func (sc *SmartContract) getOrganizationRole(stub shim.ChaincodeStubInterface) string {
+	idOk, who := sc.getInvokerIdentity(stub)
+	if !idOk {
+		_MainLogger.Error("Unable to retrive the invoker ID")
+		return ""
+	}
+	key := fmt.Sprintf("PARTICIPANT_%s", who)
+	_MainLogger.Infof("User key %s", key)
+	if roleJSON, err := stub.GetState(key); err == nil {
+		_MainLogger.Infof("User key %s", string(roleJSON))
+		role := string(roleJSON)
+		return role
+	}
+	_MainLogger.Error("Unable to retrive the role , not registered")
+	return ""
 
 }
 func main() {
